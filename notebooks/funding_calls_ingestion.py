@@ -18,14 +18,19 @@ from arxiv_curator.config import get_env, load_config
 # In Databricks (notebook/job): normal SparkSession
 # On my laptop: Databricks Connect with serverless compute
 if "DATABRICKS_RUNTIME_VERSION" in os.environ:
+    # In Databricks: env comes from the job's base parameters ("dev" when run by hand)
+    from databricks.sdk.runtime import dbutils
+
+    dbutils.widgets.text("env", "dev")
+    env = dbutils.widgets.get("env")
     spark = SparkSession.builder.getOrCreate()
 else:
+    # On my laptop: env from the ENV variable (default "dev")
     from databricks.connect import DatabricksSession
 
+    env = get_env()
     spark = DatabricksSession.builder.serverless().getOrCreate()
 
-# Load config
-env = get_env()
 cfg = load_config("../project_config.yml", env)
 
 CATALOG = cfg.catalog
