@@ -72,6 +72,11 @@ lint.ignore = [
     "C901", # too complex
 ]
 
+
+[tool.ruff.lint.per-file-ignores]
+"lecture_*/*.py" = ["ERA001", "D100", "ANN"]       # Databricks notebooks: # MAGIC lines aren't code
+"src/arxiv_curator/**/*.py" = ["D100", "D205", "D400", "D415"]  # docstring style in course modules
+
 [tool.ruff.format]
 indent-style = "space"
 docstring-code-format = true
@@ -82,4 +87,4 @@ dev = [
 ]
 
 [tool.databricks.environment]
-environment_version = "6"
+environment_version = "5"
