@@ -102,12 +102,33 @@ def fetch_funding_calls(text: str, page_size: int = 20) -> list[dict]:
     return calls
 
 
+TOPIC_DETAILS_URL = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topicDetails/{}.json"
+
+
+def fetch_topic_description(call_id: str) -> str | None:
+    """Fetch the full call text (expected outcome, scope) from the topic details page."""
+    response = requests.get(TOPIC_DETAILS_URL.format(call_id.lower()), timeout=30)
+    if not response.ok:
+        return None
+    return response.json().get("TopicDetails", {}).get("description")
+
+
 all_calls = []
 for term in SEARCH_TERMS:
     calls = fetch_funding_calls(term)
     logger.info(f"'{term}': {len(calls)} calls")
     all_calls.extend(calls)
 
+# The search API has no call text for grants, so fetch it once per unique call
+descriptions = {}
+for call in all_calls:
+    call_id = call["call_id"]
+    if call_id and call_id not in descriptions:
+        descriptions[call_id] = fetch_topic_description(call_id)
+    call["description"] = descriptions.get(call_id)
+
+found = sum(1 for text in descriptions.values() if text)
+logger.info(f"Fetched full text for {found} of {len(descriptions)} unique calls")
 logger.info(f"Fetched {len(all_calls)} calls in total (before removing duplicates)")
 logger.info(f"Sample: {all_calls[0]['call_id']} - {all_calls[0]['title']}")
 
