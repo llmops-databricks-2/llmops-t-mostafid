@@ -173,3 +173,16 @@ Agent (course_ops.gateway.chat) + tools: search calls, call details, deadline ch
         │
         ▼
 MLflow tracing, evaluation and monitoring
+
+
+## Lecture 2: Retrieval foundation
+
+| Notebook | What it does |
+|---|---|
+| `notebooks/funding_calls_ingestion.py` | Now also fetches the full call text (topic details endpoint): 89/89 calls |
+| `notebooks/2.2_funding_call_chunks.py` | Sentence-based chunks → `funding_call_chunks` (446 chunks, Change Data Feed on) |
+| `notebooks/2.3_chunking_strategies.py` | Compares fixed-size (500/1000/2000), sentence and section chunking |
+| `notebooks/2.4_embeddings.py` | Adds 1024-dim embeddings with `ai_query` (GTE Large) |
+| `notebooks/2.5_synced_table.py` | Lakebase synced table + semantic, filtered and hybrid search with pgvector |
+
+Helper: `src/arxiv_curator/vector_search.py` (adapted from the course's Lakebase pgvector manager).
