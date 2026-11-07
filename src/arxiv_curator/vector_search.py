@@ -1,8 +1,8 @@
 """Lakebase pgvector search over the funding call chunks Synced Table.
 
-Adapted from the course's vector_search.py: same connection, extension, index and
-scoring logic; only the table name, the columns and the filter (is_open instead of
-year) are changed for the Funding Scout use case.
+Adapted from the course's vector_search.py: same connection, index and scoring
+logic; only the table name, the columns, the filter (is_open instead of year) and
+the extension (plain pgvector instead of lakebase_vector) are changed.
 """
 
 from __future__ import annotations
@@ -90,14 +90,15 @@ class LakebasePgVectorManager:
         return psycopg.connect(self._get_connection_string())
 
     def ensure_extension(self) -> None:
-        """Enable lakebase_vector (installs pgvector with CASCADE).
+        """Enable pgvector (the 'vector' extension).
 
         Must run before the Synced Table with a vector column is created: creating a
         synced table does not install extensions.
         """
         with self.connection() as conn:
-            conn.execute("CREATE EXTENSION IF NOT EXISTS lakebase_vector CASCADE")
-        logger.info("lakebase_vector extension ready")
+            # Plain pgvector: lakebase_vector needs "Lakebase Search" enabled on the project
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        logger.info("pgvector extension ready")
 
     def ensure_indexes(self) -> None:
         """Create the full-text (GIN) index on the Synced Table. Safe to rerun."""

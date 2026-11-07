@@ -21,6 +21,7 @@ class ProjectConfig(BaseModel):
     experiment_path: str = Field(..., description="MLflow experiment path for this environment")
     warehouse_id: str = Field(..., description="Warehouse ID")
     lakebase_instance: str | None = Field(None, description="Lakebase project (lb-...)")
+    usage_policy_id: str | None = Field(None, description="Usage policy for serverless jobs and pipelines")
 
     @property
     def lakebase_project_id(self) -> str | None:
@@ -56,7 +57,9 @@ class ProjectConfig(BaseModel):
         if env not in config_data:
             raise ValueError(f"Environment '{env}' not found in config file")
 
-        return cls(**config_data[env])
+        # Top-level values (same for all environments) + the environment's own section
+        data = {"usage_policy_id": config_data.get("usage_policy_id"), **config_data[env]}
+        return cls(**data)
 
     @property
     def schema(self) -> str:
