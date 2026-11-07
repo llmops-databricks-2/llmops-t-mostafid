@@ -156,3 +156,39 @@ with pgvector.connection() as conn:
 logger.info(f"Rows in Lakebase: {count}")
 for row in rows:
     logger.info(row)
+
+
+# COMMAND ----------
+# 6. Index the copy for keyword search (GIN index, like the teacher's ensure_indexes)
+
+pgvector.ensure_indexes()
+
+
+def show(title: str, results: list[dict]) -> None:
+    """Print search results in a short, readable form."""
+    logger.info(title)
+    for position, row in enumerate(results, 1):
+        scores = f"score={float(row['score']):.3f}"
+        if "vector_score" in row:
+            scores += f" (vector={float(row['vector_score']):.3f}, text={float(row['text_score']):.3f})"
+        logger.info(f"  {position}. {row['call_id']} | open={row['is_open']} | deadline={row['deadline']} | {scores}")
+        logger.info(f"     {row['title'][:90]}")
+
+
+# COMMAND ----------
+# 7. Semantic search: by meaning
+
+query = "satellite-based flood monitoring and early warning"
+show(f"SEMANTIC: {query}", pgvector.search(query=query, num_results=5))
+
+# COMMAND ----------
+# 8. Filtered search: same question, only calls you can still apply to
+
+show(f"FILTERED (is_open=True): {query}", pgvector.search(query=query, num_results=5, is_open=True))
+
+# COMMAND ----------
+# 9. Hybrid search vs. semantic on a question with an exact name
+
+query = "Copernicus emergency management service"
+show(f"SEMANTIC: {query}", pgvector.search(query=query, num_results=5))
+show(f"HYBRID: {query}", pgvector.hybrid_search(query=query, num_results=5))
