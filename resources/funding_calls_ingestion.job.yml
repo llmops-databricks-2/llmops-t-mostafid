@@ -1,0 +1,22 @@
+# Funding calls ingestion job: one serverless notebook task that fetches Horizon Europe
+# funding calls, cleans them and writes them to the funding_calls table in the target's schema
+# (dev: llmops_dev.t_mostafid.funding_calls).
+resources:
+  jobs:
+    funding_calls_ingestion:
+      name: job-funding-calls-ingestion-t-mostafid-${bundle.target}
+      budget_policy_id: "8029c297-257c-3909-ba40-79eac5a492aa"
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "5"
+            dependencies:
+              - ../dist/*.whl
+
+      tasks:
+        - task_key: ingest_funding_calls
+          environment_key: default
+          notebook_task:
+            notebook_path: ../notebooks/funding_calls_ingestion.py
+            base_parameters:
+              env: ${bundle.target}
