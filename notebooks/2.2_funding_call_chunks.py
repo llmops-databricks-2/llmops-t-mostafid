@@ -2,6 +2,7 @@
 """Lecture 2.2 (my use case): turn funding call texts into chunks."""
 
 import os
+import re
 
 from loguru import logger
 from pyspark.sql import SparkSession
@@ -41,24 +42,28 @@ calls_df.select("call_id", F.substring("description", 1, 300).alias("description
 
 
 # COMMAND ----------
-# 2. Chunk the call texts (strategy 1: fixed size with overlap)
+# 2. Chunk the call texts: sentence-based, chosen in 2.3
+# (fixed-size cut 57-74 % of chunks mid-word; sections were too long)
 
-CHUNK_SIZE = 1000  # characters per chunk
-CHUNK_OVERLAP = 200  # characters shared by neighbouring chunks
+MAX_SENTENCES = 5  # sentences per chunk, ~260 tokens on average
 
 
-def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Cut text into pieces of `size` characters; neighbours share `overlap` characters."""
-    chunks = []
-    for start in range(0, len(text), size - overlap):
-        chunks.append(text[start : start + size])
-        if start + size >= len(text):
-            break
+def sentence_chunking(text: str, max_sentences: int = MAX_SENTENCES) -> list[str]:
+    """Create chunks based on sentence boundaries (the teacher's function from 2.3)."""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks, current_chunk = [], []
+    for sentence in sentences:
+        current_chunk.append(sentence)
+        if len(current_chunk) >= max_sentences:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = []
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
     return chunks
 
 
-#
-chunk_text_udf = F.udf(chunk_text, ArrayType(StringType()))
+# Spark style, DataProcessor: a UDF + explode, runs in Databricks
+chunk_text_udf = F.udf(sentence_chunking, ArrayType(StringType()))
 
 chunks_df = (
     calls_df.filter(F.col("description").isNotNull())
