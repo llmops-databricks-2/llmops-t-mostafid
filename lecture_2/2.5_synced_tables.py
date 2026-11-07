@@ -21,12 +21,12 @@
 
 # COMMAND ----------
 
-from arxiv_curator.vector_search import LakebasePgVectorManager
 from databricks.sdk import WorkspaceClient
 from loguru import logger
 from pyspark.sql import SparkSession
 
 from arxiv_curator.config import get_env, load_config
+from arxiv_curator.vector_search import LakebasePgVectorManager
 
 # COMMAND ----------
 
