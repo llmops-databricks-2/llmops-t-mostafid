@@ -20,6 +20,13 @@ class ProjectConfig(BaseModel):
     embedding_service: str = Field(..., description="AI Gateway embedding model service name for the OpenAI client")
     experiment_path: str = Field(..., description="MLflow experiment path for this environment")
     warehouse_id: str = Field(..., description="Warehouse ID")
+    lakebase_instance: str | None = Field(None, description="Lakebase project (lb-...)")
+
+    @property
+    def lakebase_project_id(self) -> str | None:
+        """Same value under the name the course's Lakebase code uses."""
+        return self.lakebase_instance
+
     genie_space_id: str | None = Field(None, description="Genie space ID for MCP integration")
     system_prompt: str = Field(
         default="You are a helpful AI assistant that helps users find and understand research papers.",
