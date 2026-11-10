@@ -11,7 +11,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType
 
-from arxiv_curator.config import get_env, load_config
+from arxiv_curator.config import load_config  # get_env
 
 # COMMAND ----------
 # Create Spark session
@@ -28,7 +28,7 @@ else:
     # On my laptop: env from the ENV variable (default "dev")
     from databricks.connect import DatabricksSession
 
-    env = get_env()
+    env = os.environ.get("ENV", "dev")
     spark = DatabricksSession.builder.serverless().getOrCreate()
 
 cfg = load_config("../project_config.yml", env)
