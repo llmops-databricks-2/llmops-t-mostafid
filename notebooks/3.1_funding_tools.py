@@ -88,4 +88,12 @@ search_calls_tool = ToolInfo(name="search_calls", spec=search_calls_spec, exec_f
 # COMMAND ----------
 # Test the tool on its own (before giving it to a model)
 
-logger.info(search_calls("drone-based traffic monitoring for emergency evacuation", num_results=3))
+TEST_QUERIES = [
+    "road traffic monitoring with cameras and sensors",
+    "traffic flow estimation from aerial or drone imagery",
+    "intelligent transport systems for road safety",
+]
+for test_query in TEST_QUERIES:
+    logger.info(f"QUERY: {test_query}")
+    for call in json.loads(search_calls(test_query, num_results=3)):
+        logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")

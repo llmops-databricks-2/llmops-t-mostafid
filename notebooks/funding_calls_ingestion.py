@@ -46,15 +46,22 @@ logger.info(f"Schema {CATALOG}.{SCHEMA} ready")
 
 API_URL = "https://api.tech.ec.europa.eu/search-api/prod/rest/search"
 
-# Search terms for traffic monitoring and disaster management
+# Search terms: road traffic first (main focus), plus disaster management
 SEARCH_TERMS = [
+    # road traffic monitoring
+    "road traffic",
+    "traffic management",
+    "intelligent transport systems",
+    "connected and automated mobility",
+    "road safety",
+    "urban mobility",
+    "transport infrastructure monitoring",
+    # disaster management with remote sensing
     "flood",
     "wildfire",
     "disaster resilience",
     "earth observation",
     "copernicus",
-    "traffic monitoring",
-    "mobility",
 ]
 
 
