@@ -97,3 +97,100 @@ for test_query in TEST_QUERIES:
     logger.info(f"QUERY: {test_query}")
     for call in json.loads(search_calls(test_query, num_results=3)):
         logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")
+
+
+# COMMAND ----------
+# 2. get_call_details: all facts about ONE call (the model already knows the call_id)
+
+
+def get_call_details(call_id: str) -> str:
+    """Return title, deadline, status, link and the start of the call text for one call."""
+    with pgvector.connection() as conn:
+        rows = conn.execute(
+            f"""SELECT call_id, title, deadline, status, is_open, url, text
+                FROM {pgvector.table_name}
+                WHERE call_id = %s
+                ORDER BY chunk_id""",
+            (call_id,),
+        ).fetchall()
+
+    if not rows:
+        return json.dumps({"error": f"No call found with id {call_id}"})
+
+    first = rows[0]
+    full_text = " ".join(row[6] for row in rows)
+    details = {
+        "call_id": first[0],
+        "title": first[1],
+        "deadline": str(first[2]),
+        "status": first[3],
+        "is_open": first[4],
+        "url": first[5],
+        "text_start": full_text[:1500] + "...",
+    }
+    return json.dumps(details, indent=2)
+
+
+get_call_details_spec = {
+    "type": "function",
+    "function": {
+        "name": "get_call_details",
+        "description": (
+            "Get the details of ONE funding call by its call_id: title, deadline, status, "
+            "whether it is open, link, and the start of the call text (expected outcome, scope). "
+            "Use it after search_calls, when the user asks about a specific call."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "call_id": {
+                    "type": "string",
+                    "description": "The call id, e.g. 'HORIZON-CL5-2027-06-D6-04'",
+                },
+            },
+            "required": ["call_id"],
+        },
+    },
+}
+
+get_call_details_tool = ToolInfo(name="get_call_details", spec=get_call_details_spec, exec_fn=get_call_details)
+
+# COMMAND ----------
+# 3. Tool registry (same as the teacher's section 6): all tools in one place
+
+
+class ToolRegistry:
+    """Registry for managing agent tools."""
+
+    def __init__(self) -> None:
+        self._tools: dict[str, ToolInfo] = {}
+
+    def register(self, tool: ToolInfo) -> None:
+        """Register a tool."""
+        self._tools[tool.name] = tool
+        logger.info(f"Registered tool: {tool.name}")
+
+    def get_all_specs(self) -> list[dict]:
+        """Get all tool specifications (what the model reads)."""
+        return [tool.spec for tool in self._tools.values()]
+
+    def execute(self, name: str, args: dict) -> str:
+        """Run a tool by name, like the agent will when the model asks for it."""
+        if name not in self._tools:
+            raise ValueError(f"Tool not found: {name}")
+        return self._tools[name].exec_fn(**args)
+
+    def list_tools(self) -> list[str]:
+        """List all registered tool names."""
+        return list(self._tools)
+
+
+registry = ToolRegistry()
+registry.register(search_calls_tool)
+registry.register(get_call_details_tool)
+
+# COMMAND ----------
+# 4. Execute tools by name (this is exactly what the agent will do)
+
+logger.info(registry.execute("get_call_details", {"call_id": "HORIZON-CL5-2027-06-D6-04"}))
+logger.info(registry.execute("get_call_details", {"call_id": "DOES-NOT-EXIST"}))
