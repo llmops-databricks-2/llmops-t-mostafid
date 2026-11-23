@@ -1,0 +1,78 @@
+# Genie space over the funding calls table: lets the agent ask table questions in plain English
+# (counts, deadlines, sorting). Adapted from the course's genie_space.yml; permissions for the
+# agent's service principal are added in lecture 5 (deployment).
+resources:
+  genie_spaces:
+    funding-scout-space:
+      title: funding-scout-space-${bundle.target}
+      description: >-
+        Ask questions about EU funding calls for road traffic monitoring and disaster management.
+      warehouse_id: "2a20a01bf01be73f"
+      # Genie validates this strictly: every id is 32 lowercase hex characters, id-keyed
+      # lists are sorted by id, and column_configs are sorted by column_name.
+      serialized_space:
+        version: 2
+        config:
+          sample_questions:
+            - id: "10000000000000000000000000000001"
+              question: ["Which open calls close soonest?"]
+            - id: "10000000000000000000000000000002"
+              question: ["How many open calls are there per search term?"]
+            - id: "10000000000000000000000000000003"
+              question: ["Which open calls are about road traffic?"]
+        data_sources:
+          tables:
+            - identifier: "llmops_${bundle.target}.t_mostafid.funding_calls"
+              column_configs:
+                - column_name: call_id
+                  description: ["Identifier of the funding call, for example HORIZON-CL5-2027-06-D6-04."]
+                  synonyms: ["topic id", "call id"]
+                - column_name: call_identifier
+                  description: ["Identifier of the parent call that groups several topics."]
+                - column_name: deadline
+                  description: ["Submission deadline (DATE)."]
+                  synonyms: ["closing date", "due date"]
+                - column_name: description
+                  description: ["Full call text: expected outcome and scope."]
+                - column_name: ingestion_timestamp
+                  description: ["When the row was collected."]
+                - column_name: is_open
+                  description: ["True if the deadline is in the future, so researchers can still apply."]
+                  synonyms: ["open", "still open", "can apply"]
+                - column_name: processed
+                  exclude: true
+                - column_name: search_term
+                  description: ["Topic search term that found the call, e.g. road traffic, flood."]
+                  synonyms: ["topic"]
+                - column_name: source
+                  description: ["Funding programme source, e.g. horizon_europe."]
+                - column_name: status
+                  description: ["open = submissions accepted; forthcoming = opens soon."]
+                - column_name: title
+                  description: ["Title of the funding call."]
+                  enable_entity_matching: true
+                - column_name: url
+                  description: ["Link to the call on the EU Funding & Tenders Portal."]
+                - column_name: volume_path
+                  exclude: true
+        instructions:
+          text_instructions:
+            - id: "30000000000000000000000000000001"
+              content:
+                - "Each row in funding_calls is one EU funding call (topic)."
+                - "When the user asks for open calls or calls they can apply to, filter on is_open = true."
+                - "status 'forthcoming' calls can be prepared now; they are not closed."
+                - "When listing calls, show call_id, title, deadline and url, sorted by deadline."
+          example_question_sqls:
+            - id: "20000000000000000000000000000001"
+              question: ["Which open calls close soonest?"]
+              sql:
+                - "SELECT call_id, title, deadline, url "
+                - "FROM llmops_${bundle.target}.t_mostafid.funding_calls "
+                - "WHERE is_open ORDER BY deadline LIMIT 10"
+            - id: "20000000000000000000000000000002"
+              question: ["How many open calls are there per search term?"]
+              sql:
+                - "SELECT search_term, COUNT(*) AS open_calls "
+                - "FROM llmops_${bundle.target}.t_mostafid.funding_calls "
+                - "WHERE is_open GROUP BY search_term ORDER BY open_calls DESC"
