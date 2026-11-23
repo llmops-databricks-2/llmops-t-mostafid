@@ -1,11 +1,12 @@
 # Databricks notebook source
-"""Lecture 3.1 funding call tools for the agent."""
+"""Lecture 3.1 (my use case): funding call tools and a simple agent."""
 
 import json
 import os
 
 from databricks.sdk import WorkspaceClient
 from loguru import logger
+from openai import OpenAI
 
 from arxiv_curator.config import get_env, load_config
 from arxiv_curator.mcp import ToolInfo
@@ -33,9 +34,12 @@ def search_calls(query: str, num_results: int = 5) -> str:
 
     Code-controlled rules (from the lecture 2 findings):
     - only open calls (is_open = true), the model cannot turn this off
+    - only good matches (score >= min_score)
     - one result per call: fetch extra chunks, keep the best chunk per call
     """
+    min_score = 0.6  # weaker matches are not returned at all
     rows = pgvector.search(query=query, num_results=num_results * 4, is_open=True)
+    rows = [row for row in rows if float(row["score"]) >= min_score]
 
     best_per_call = {}
     for row in rows:  # rows are sorted best first, so the first chunk per call is its best
@@ -84,20 +88,6 @@ search_calls_spec = {
 }
 
 search_calls_tool = ToolInfo(name="search_calls", spec=search_calls_spec, exec_fn=search_calls)
-
-# COMMAND ----------
-# Test the tool on its own (before giving it to a model)
-
-TEST_QUERIES = [
-    "road traffic monitoring with cameras and sensors",
-    "traffic flow estimation from aerial or drone imagery",
-    "intelligent transport systems for road safety",
-]
-for test_query in TEST_QUERIES:
-    logger.info(f"QUERY: {test_query}")
-    for call in json.loads(search_calls(test_query, num_results=3)):
-        logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")
-
 
 # COMMAND ----------
 # 2. get_call_details: all facts about ONE call (the model already knows the call_id)
@@ -190,7 +180,120 @@ registry.register(search_calls_tool)
 registry.register(get_call_details_tool)
 
 # COMMAND ----------
-# 4. Execute tools by name (this is exactly what the agent will do)
+# 4. Test the tools on their own (before giving them to a model)
 
-logger.info(registry.execute("get_call_details", {"call_id": "HORIZON-CL5-2027-06-D6-04"}))
+TEST_QUERIES = [
+    "road traffic monitoring with cameras and sensors",
+    "traffic flow estimation from aerial or drone imagery",
+    "intelligent transport systems for road safety",
+]
+for test_query in TEST_QUERIES:
+    logger.info(f"QUERY: {test_query}")
+    calls = json.loads(registry.execute("search_calls", {"query": test_query, "num_results": 3}))
+    if not calls:
+        logger.info("  (no match with score >= 0.6)")
+    for call in calls:
+        logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")
+
 logger.info(registry.execute("get_call_details", {"call_id": "DOES-NOT-EXIST"}))
+
+# COMMAND ----------
+# 5. The agent: model + tools + loop (the teacher's SimpleAgent, with my tools)
+
+SYSTEM_PROMPT = """You are Funding Scout, an assistant for researchers in road traffic monitoring
+and disaster management. You help them find EU funding calls that fit their research.
+
+Rules:
+- Use search_calls to find calls; use get_call_details for facts about one specific call.
+- Only recommend calls returned by the tools. Never invent calls, deadlines or links.
+- For each recommended call give: title, call_id, deadline, link, and one sentence on why it fits.
+- All calls returned by search_calls have a deadline in the future, so the user can apply to them.
+  Status "open" = submissions already accepted; "forthcoming" = opens soon, preparation can start now.
+- If search_calls returns an empty list, say there is no strong match in the current data."""
+
+
+class SimpleAgent:
+    """A simple agent that can call tools in a loop."""
+
+    def __init__(self, llm_endpoint: str, system_prompt: str, tools: list[ToolInfo]) -> None:
+        self.llm_endpoint = llm_endpoint
+        self.system_prompt = system_prompt
+        self._tools_dict = {tool.name: tool for tool in tools}
+        workspace = WorkspaceClient()
+        self._client = OpenAI(  # my existing login, no new token created
+            api_key=workspace.config.authenticate()["Authorization"].removeprefix("Bearer "),
+            base_url=f"{workspace.config.host.rstrip('/')}/ai-gateway/mlflow/v1",
+        )
+
+    def get_tool_specs(self) -> list[dict]:
+        """Get tool specifications for the LLM."""
+        return [tool.spec for tool in self._tools_dict.values()]
+
+    def execute_tool(self, tool_name: str, args: dict) -> str:
+        """Execute a tool by name."""
+        if tool_name not in self._tools_dict:
+            raise ValueError(f"Unknown tool: {tool_name}")
+        return self._tools_dict[tool_name].exec_fn(**args)
+
+    def chat(self, user_message: str, max_iterations: int = 10) -> str:
+        """Chat with the agent, allowing tool calls."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
+        for _iteration in range(max_iterations):
+            response = self._client.chat.completions.create(
+                model=self.llm_endpoint,
+                messages=messages,
+                tools=self.get_tool_specs() if self._tools_dict else None,
+            )
+            assistant_message = response.choices[0].message
+
+            if assistant_message.tool_calls:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_message.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                            }
+                            for tc in assistant_message.tool_calls
+                        ],
+                    }
+                )
+                for tool_call in assistant_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
+                    logger.info(f"Calling tool: {tool_name}({tool_args})")
+                    try:
+                        result = self.execute_tool(tool_name, tool_args)
+                    except Exception as e:  # noqa: BLE001  the model gets the error instead of a crash
+                        result = f"Error: {e}"
+                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": str(result)})
+            else:
+                return assistant_message.content
+
+        return "Max iterations reached."
+
+
+agent = SimpleAgent(
+    llm_endpoint=cfg.llm_endpoint,
+    system_prompt=SYSTEM_PROMPT,
+    tools=[search_calls_tool, get_call_details_tool],
+)
+
+# COMMAND ----------
+# 6. Test the agent
+
+questions = [
+    "I work on road traffic monitoring with cameras and sensors. Which open calls fit me?",
+    "What is the deadline and the link of HORIZON-CL5-2027-06-D6-04?",
+]
+for question in questions:
+    logger.info("=" * 80)
+    logger.info(f"USER: {question}")
+    logger.info(f"AGENT: {agent.chat(question)}")
