@@ -105,3 +105,149 @@ databricks bundle validate -t dev
 ```
 
 Each environment logs to its own MLflow experiment and UC trace tables in its matching catalog. You can manage the dev experiment and write dev traces; acc and prd are read-only for you. Each deploy service principal manages its own environment’s experiment and writes to that environment’s schema.
+
+# Usecase: Funding Scout for Traffic Monitoring & Disaster Management
+
+An LLMOps project on Databricks: an AI agent that helps researchers in
+**traffic monitoring and disaster management** find and evaluate relevant
+funding calls from **Horizon Europe** and **ESA**.
+
+## Problem and users
+
+Researchers working with satellite, aerial and drone imagery (PhD students,
+postdocs, research groups, small EO startups) need funding, but calls are
+spread across several portals, are long, and have different deadlines,
+budgets and eligibility rules. Finding the few calls that fit a specific
+topic, such as flood mapping or traffic flow estimation, takes hours.
+
+## What it does
+
+- **Collect:** a Databricks job loads funding calls into a Delta table.
+- **Search:** the agent finds the calls that match the user's research.
+- **Explain:** for each call, it gives the deadline, budget and why it fits.
+- **Evaluate and monitor:** the agent is traced and evaluated with MLflow.
+
+## Example questions
+
+- Which open calls fit drone-based traffic monitoring?
+- Are there Horizon Europe calls on flood or wildfire early warning with satellite data?
+- Which calls close in the next 3 months?
+- What is the budget and eligibility for call X?
+
+## Data sources
+
+| Source | What it provides |
+|---|---|
+| EU Funding & Tenders Portal | Horizon Europe topics on disaster resilience, mobility and space |
+| ESA | Earth Observation funding opportunities |
+
+Start small: about 30–80 calls.
+
+## Data contract
+
+| Column | Description |
+|---|---|
+| call_id | Unique id of the call |
+| source | `horizon_europe` or `esa` |
+| title | Title of the call |
+| programme | Programme or cluster |
+| description | Call text |
+| deadline | Submission deadline |
+| budget | Budget, when available |
+| url | Link to the original call |
+| ingested_at | When the call was collected |
+
+## Architecture
+
+```
+Funding portals (Horizon Europe, ESA)
+        │
+        ▼
+Ingestion job ──► Delta table in llmops_dev.t_mostafid
+        │
+        ▼
+Embeddings (course_ops.gateway.embed) ──► Lakebase pgvector
+        │
+        ▼
+Agent (course_ops.gateway.chat) + tools: search calls, call details, deadline check
+        │
+        ▼
+MLflow tracing, evaluation and monitoring
+
+
+## Lecture 2: Retrieval foundation
+
+| Notebook | What it does |
+|---|---|
+| `notebooks/funding_calls_ingestion.py` | Now also fetches the full call text (topic details endpoint): 89/89 calls |
+| `notebooks/2.2_funding_call_chunks.py` | Sentence-based chunks → `funding_call_chunks` (446 chunks, Change Data Feed on) |
+| `notebooks/2.3_chunking_strategies.py` | Compares fixed-size (500/1000/2000), sentence and section chunking |
+| `notebooks/2.4_embeddings.py` | Adds 1024-dim embeddings with `ai_query` (GTE Large) |
+| `notebooks/2.5_synced_table.py` | Lakebase synced table + semantic, filtered and hybrid search with pgvector |
+
+Helper: `src/arxiv_curator/vector_search.py` (adapted from the course's Lakebase pgvector manager).
+
+
+
+## Lecture 3: Agent with tools and memory
+
+### Orchestration
+
+```
+User question + session_id
+   │
+   ▼
+[code]  load conversation history from Lakebase (session_messages)
+   │
+   ▼
+[code]  messages = system prompt + history + question
+   │
+   ▼
+┌─► [model] answer directly, or ask for one or more tools?
+│      │ tool call
+│      ▼
+│   [code] run the tool, add the result to messages
+└──────┘  (max 5 rounds; in the last round no tools are offered)
+   │ final answer
+   ▼
+[code]  save question + final answer to Lakebase
+```
+
+| Code decides (always, reliable) | Model decides (flexible) |
+|---|---|
+| Load history at the start, save question + answer at the end | Whether a tool is needed |
+| `search_calls` returns only available calls (future deadline) | Which tool to call |
+| `search_calls` drops matches below score 0.6 | The search query (it rewrites the user's words) |
+| One result per call (best chunk per call) | How many results to ask for |
+| Plain availability wording instead of the raw EU status | When it has enough information |
+| Max 5 rounds; last round without tools → always an answer | How to explain why a call fits |
+
+### Tools
+
+| Tool | Source | Use |
+|---|---|---|
+| `search_calls(query, num_results)` | Own function, Lakebase pgvector | Which calls fit a research topic (meaning) |
+| `get_call_details(call_id)` | Own function, Lakebase SQL | Deadline, status, link and text of one call |
+| `query_space_…` / `poll_response_…` | Genie space via managed MCP | Table questions: counts, sorting by deadline |
+
+The Genie space (`resources/genie_space.yml`) is deployed with the bundle and covers `funding_calls`
+with column descriptions, instructions and example SQL.
+
+### Memory
+
+- Lakebase table `session_messages` (one row per message, stored as JSONB, grouped by `session_id`).
+- Only the question and the final answer are saved, not tool calls/results: the history is re-sent on
+  every turn, so this keeps it short and cheap.
+
+### Observations
+
+- Data mattered more than the search: adding road-traffic search terms to the ingestion (89 → 135
+  calls) made CCAM/ITS calls appear; aerial/drone traffic estimation still has no strong match.
+- The model picks tools well (search vs. details vs. Genie) and recovered from a mistyped call id
+  thanks to a clean tool error message.
+- "Open" meant two things (can still apply vs. EU status "open"), which made the agent re-search up
+  to 7 times. Plain wording in the tool output, a prompt rule and a loop cap reduced it to 3 calls;
+  it still prefers already-open calls over more relevant forthcoming ones → to measure in lecture 4.
+- Answers vary between runs with the same prompt; rules that must always hold were moved into code.
+- The course's `create_mcp_tools` was `async` but calls a synchronous client that starts its own
+  event loop; it was made a normal function.

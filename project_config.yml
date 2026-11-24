@@ -21,6 +21,7 @@ dev:
   experiment_path: "/llmops/t-mostafid-dev"
   # Your provisioned Lakebase project.
   lakebase_instance: "lb-llmops-t-mostafid"
+  genie_space_id: "01f1e74c2613145d8e3dde74d49de929"
 
 # Acceptance: your schema in the acceptance catalog, written by your deploys; you read it.
 acc:
