@@ -5,11 +5,12 @@ import json
 import os
 
 from databricks.sdk import WorkspaceClient
+from databricks_mcp import DatabricksMCPClient
 from loguru import logger
 from openai import OpenAI
 
 from arxiv_curator.config import get_env, load_config
-from arxiv_curator.mcp import ToolInfo
+from arxiv_curator.mcp import ToolInfo, create_mcp_tools
 from arxiv_curator.vector_search import LakebasePgVectorManager
 
 # COMMAND ----------
@@ -49,6 +50,7 @@ def search_calls(query: str, num_results: int = 5) -> str:
                 "title": row["title"],
                 "deadline": str(row["deadline"]),
                 "status": row["status"],
+                "can_apply": True,  # code-controlled: search_calls only returns calls with a future deadline
                 "url": row["url"],
                 "excerpt": row["text"][:300] + "...",
                 "score": round(float(row["score"]), 3),
@@ -204,7 +206,8 @@ SYSTEM_PROMPT = """You are Funding Scout, an assistant for researchers in road t
 and disaster management. You help them find EU funding calls that fit their research.
 
 Rules:
-- Use search_calls to find calls; use get_call_details for facts about one specific call.
+- Use search_calls to find calls by research topic; use get_call_details for facts about one call.
+- Use the Genie tool for table questions: counting calls, listing or sorting them by deadline.
 - Only recommend calls returned by the tools. Never invent calls, deadlines or links.
 - For each recommended call give: title, call_id, deadline, link, and one sentence on why it fits.
 - All calls returned by search_calls have a deadline in the future, so the user can apply to them.
@@ -297,3 +300,28 @@ for question in questions:
     logger.info("=" * 80)
     logger.info(f"USER: {question}")
     logger.info(f"AGENT: {agent.chat(question)}")
+
+
+# COMMAND ----------
+# 7. Genie as a third tool, through MCP
+
+w = WorkspaceClient()
+genie_url = f"{w.config.host.rstrip('/')}/api/2.0/mcp/genie/{cfg.genie_space_id}"
+genie_client = DatabricksMCPClient(server_url=genie_url, workspace_client=w)
+
+logger.info(f"Genie MCP URL: {genie_url}")
+for tool in genie_client.list_tools():
+    logger.info(f"Genie tool: {tool.name}")
+
+genie_tools = create_mcp_tools(w, [genie_url])
+
+full_agent = SimpleAgent(
+    llm_endpoint=cfg.llm_endpoint,
+    system_prompt=SYSTEM_PROMPT,
+    tools=[search_calls_tool, get_call_details_tool, *genie_tools],
+)
+
+question = "How many open calls close before June 2027, and which ones close first?"
+logger.info("=" * 80)
+logger.info(f"USER: {question}")
+logger.info(f"AGENT: {full_agent.chat(question)}")

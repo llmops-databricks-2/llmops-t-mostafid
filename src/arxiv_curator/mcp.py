@@ -48,7 +48,7 @@ def create_managed_exec_fn(server_url: str, tool_name: str, w: WorkspaceClient) 
     return exec_fn
 
 
-async def create_mcp_tools(w: WorkspaceClient, url_list: list[str]) -> list[ToolInfo]:
+def create_mcp_tools(w: WorkspaceClient, url_list: list[str]) -> list[ToolInfo]:
     """Create tools from MCP servers.
 
     Args:
