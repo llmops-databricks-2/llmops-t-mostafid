@@ -1,8 +1,9 @@
 # Databricks notebook source
-"""Lecture 3.1 (my use case): funding call tools and a simple agent."""
+"""Lecture 3 (my use case): funding call tools, Genie via MCP, and an agent with memory."""
 
 import json
 import os
+import uuid
 
 from databricks.sdk import WorkspaceClient
 from databricks_mcp import DatabricksMCPClient
@@ -11,7 +12,14 @@ from openai import OpenAI
 
 from arxiv_curator.config import get_env, load_config
 from arxiv_curator.mcp import ToolInfo, create_mcp_tools
+from arxiv_curator.memory import LakebaseMemory
 from arxiv_curator.vector_search import LakebasePgVectorManager
+
+# Which tests to run (switch on/off to keep runs short)
+RUN_TOOL_TESTS = False  # sections 1-4: tools on their own
+RUN_AGENT_TESTS = False  # section 6: agent with 2 tools
+RUN_GENIE_TEST = False  # section 7: agent with Genie (slow, ~40 s)
+RUN_MEMORY_TEST = True  # section 8: follow-up question with memory
 
 # COMMAND ----------
 # Config and Lakebase search helper (no Spark needed: tools query Lakebase directly)
@@ -29,18 +37,19 @@ pgvector = LakebasePgVectorManager(config=cfg, workspace=WorkspaceClient())
 # COMMAND ----------
 # 1. search_calls: find open calls that match a research topic
 
+MIN_SCORE = 0.6  # code-controlled: weaker matches are not returned at all
+
 
 def search_calls(query: str, num_results: int = 5) -> str:
     """Find OPEN funding calls that match a research topic.
 
     Code-controlled rules (from the lecture 2 findings):
     - only open calls (is_open = true), the model cannot turn this off
-    - only good matches (score >= min_score)
+    - only matches with a score >= MIN_SCORE
     - one result per call: fetch extra chunks, keep the best chunk per call
     """
-    min_score = 0.6  # weaker matches are not returned at all
     rows = pgvector.search(query=query, num_results=num_results * 4, is_open=True)
-    rows = [row for row in rows if float(row["score"]) >= min_score]
+    rows = [row for row in rows if float(row["score"]) >= MIN_SCORE]
 
     best_per_call = {}
     for row in rows:  # rows are sorted best first, so the first chunk per call is its best
@@ -49,8 +58,11 @@ def search_calls(query: str, num_results: int = 5) -> str:
                 "call_id": row["call_id"],
                 "title": row["title"],
                 "deadline": str(row["deadline"]),
-                "status": row["status"],
-                "can_apply": True,  # code-controlled: search_calls only returns calls with a future deadline
+                # Code-controlled wording: no raw EU status, so the model can't misread "forthcoming"
+                "submission": "accepting submissions now"
+                if row["status"] == "open"
+                else "opens soon, preparation can start now",
+                "can_apply": True,
                 "url": row["url"],
                 "excerpt": row["text"][:300] + "...",
                 "score": round(float(row["score"]), 3),
@@ -66,7 +78,7 @@ search_calls_spec = {
     "function": {
         "name": "search_calls",
         "description": (
-            "Search OPEN EU funding calls (Horizon Europe) by research topic, using semantic "
+            "Search AVAILABLE EU funding calls (Horizon Europe: status open or forthcoming) by research topic, using semantic "
             "search over the call texts. Returns one entry per call with title, deadline, "
             "status, link, a text excerpt and a relevance score. Use it when the user "
             "describes their research and wants matching funding opportunities."
@@ -184,23 +196,25 @@ registry.register(get_call_details_tool)
 # COMMAND ----------
 # 4. Test the tools on their own (before giving them to a model)
 
-TEST_QUERIES = [
-    "road traffic monitoring with cameras and sensors",
-    "traffic flow estimation from aerial or drone imagery",
-    "intelligent transport systems for road safety",
-]
-for test_query in TEST_QUERIES:
-    logger.info(f"QUERY: {test_query}")
-    calls = json.loads(registry.execute("search_calls", {"query": test_query, "num_results": 3}))
-    if not calls:
-        logger.info("  (no match with score >= 0.6)")
-    for call in calls:
-        logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")
+if RUN_TOOL_TESTS:
+    TEST_QUERIES = [
+        "road traffic monitoring with cameras and sensors",
+        "traffic flow estimation from aerial or drone imagery",
+        "intelligent transport systems for road safety",
+    ]
+    for test_query in TEST_QUERIES:
+        logger.info(f"QUERY: {test_query}")
+        calls = json.loads(registry.execute("search_calls", {"query": test_query, "num_results": 3}))
+        if not calls:
+            logger.info(f"  (no match with score >= {MIN_SCORE})")
+        for call in calls:
+            logger.info(f"  {call['score']} | {call['deadline']} | {call['call_id']} | {call['title'][:80]}")
 
-logger.info(registry.execute("get_call_details", {"call_id": "DOES-NOT-EXIST"}))
+    logger.info(registry.execute("get_call_details", {"call_id": "HORIZON-CL5-2027-06-D6-04"}))
+    logger.info(registry.execute("get_call_details", {"call_id": "DOES-NOT-EXIST"}))
 
 # COMMAND ----------
-# 5. The agent: model + tools + loop (the teacher's SimpleAgent, with my tools)
+# 5. The agent: model + tools + loop (the teacher's SimpleAgent, with my tools and memory)
 
 SYSTEM_PROMPT = """You are Funding Scout, an assistant for researchers in road traffic monitoring
 and disaster management. You help them find EU funding calls that fit their research.
@@ -216,12 +230,19 @@ Rules:
 
 
 class SimpleAgent:
-    """A simple agent that can call tools in a loop."""
+    """A simple agent that can call tools in a loop, with optional Lakebase memory."""
 
-    def __init__(self, llm_endpoint: str, system_prompt: str, tools: list[ToolInfo]) -> None:
+    def __init__(
+        self,
+        llm_endpoint: str,
+        system_prompt: str,
+        tools: list[ToolInfo],
+        memory: LakebaseMemory | None = None,
+    ) -> None:
         self.llm_endpoint = llm_endpoint
         self.system_prompt = system_prompt
         self._tools_dict = {tool.name: tool for tool in tools}
+        self.memory = memory
         workspace = WorkspaceClient()
         self._client = OpenAI(  # my existing login, no new token created
             api_key=workspace.config.authenticate()["Authorization"].removeprefix("Bearer "),
@@ -238,19 +259,24 @@ class SimpleAgent:
             raise ValueError(f"Unknown tool: {tool_name}")
         return self._tools_dict[tool_name].exec_fn(**args)
 
-    def chat(self, user_message: str, max_iterations: int = 10) -> str:
-        """Chat with the agent, allowing tool calls."""
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message},
-        ]
+    def chat(self, user_message: str, session_id: str | None = None, max_iterations: int = 5) -> str:
+        """Chat with the agent; with a session_id, earlier turns are loaded and this turn is saved."""
+        # Code-controlled: always load the history of this session first
+        history = self.memory.load_messages(session_id) if self.memory and session_id else []
+        logger.info(f"Loaded {len(history)} earlier messages")
 
-        for _iteration in range(max_iterations):
+        user_entry = {"role": "user", "content": user_message}
+        messages = [{"role": "system", "content": self.system_prompt}, *history, user_entry]
+
+        for iteration in range(max_iterations):
+            # Code-controlled: in the last round no tools are offered, so the model must answer
+            last_round = iteration == max_iterations - 1
             response = self._client.chat.completions.create(
                 model=self.llm_endpoint,
                 messages=messages,
-                tools=self.get_tool_specs() if self._tools_dict else None,
+                tools=None if last_round or not self._tools_dict else self.get_tool_specs(),
             )
+
             assistant_message = response.choices[0].message
 
             if assistant_message.tool_calls:
@@ -278,50 +304,75 @@ class SimpleAgent:
                         result = f"Error: {e}"
                     messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": str(result)})
             else:
-                return assistant_message.content
+                answer = assistant_message.content
+                # Code-controlled: always save the question and the final answer (not the tool steps)
+                if self.memory and session_id:
+                    self.memory.save_messages(session_id, [user_entry, {"role": "assistant", "content": answer}])
+                return answer
 
         return "Max iterations reached."
 
 
-agent = SimpleAgent(
-    llm_endpoint=cfg.llm_endpoint,
-    system_prompt=SYSTEM_PROMPT,
-    tools=[search_calls_tool, get_call_details_tool],
-)
+# COMMAND ----------
+# 6. Test the agent with my 2 tools (no memory)
+
+if RUN_AGENT_TESTS:
+    agent = SimpleAgent(
+        llm_endpoint=cfg.llm_endpoint,
+        system_prompt=SYSTEM_PROMPT,
+        tools=[search_calls_tool, get_call_details_tool],
+    )
+    for question in [
+        "I work on road traffic monitoring with cameras and sensors. Which open calls fit me?",
+        "What is the deadline and the link of HORIZON-CL5-2027-06-D6-04?",
+    ]:
+        logger.info("=" * 80)
+        logger.info(f"USER: {question}")
+        logger.info(f"AGENT: {agent.chat(question)}")
 
 # COMMAND ----------
-# 6. Test the agent
+# 7. Genie as a third tool, through MCP (teacher's 3.2 sections 2 + 3)
 
-questions = [
-    "I work on road traffic monitoring with cameras and sensors. Which open calls fit me?",
-    "What is the deadline and the link of HORIZON-CL5-2027-06-D6-04?",
-]
-for question in questions:
+if RUN_GENIE_TEST:
+    w = WorkspaceClient()
+    genie_url = f"{w.config.host.rstrip('/')}/api/2.0/mcp/genie/{cfg.genie_space_id}"
+    genie_client = DatabricksMCPClient(server_url=genie_url, workspace_client=w)
+
+    logger.info(f"Genie MCP URL: {genie_url}")
+    for tool in genie_client.list_tools():
+        logger.info(f"Genie tool: {tool.name}")
+
+    genie_tools = create_mcp_tools(w, [genie_url])
+
+    full_agent = SimpleAgent(
+        llm_endpoint=cfg.llm_endpoint,
+        system_prompt=SYSTEM_PROMPT,
+        tools=[search_calls_tool, get_call_details_tool, *genie_tools],
+    )
+    question = "How many open calls close before June 2027, and which ones close first?"
     logger.info("=" * 80)
     logger.info(f"USER: {question}")
-    logger.info(f"AGENT: {agent.chat(question)}")
-
+    logger.info(f"AGENT: {full_agent.chat(question)}")
 
 # COMMAND ----------
-# 7. Genie as a third tool, through MCP
+# 8. Memory: a follow-up question that only works if turn 1 is remembered
 
-w = WorkspaceClient()
-genie_url = f"{w.config.host.rstrip('/')}/api/2.0/mcp/genie/{cfg.genie_space_id}"
-genie_client = DatabricksMCPClient(server_url=genie_url, workspace_client=w)
+if RUN_MEMORY_TEST:
+    memory = LakebaseMemory(project_id=cfg.lakebase_project_id, workspace=WorkspaceClient())
+    memory.ensure_schema()
 
-logger.info(f"Genie MCP URL: {genie_url}")
-for tool in genie_client.list_tools():
-    logger.info(f"Genie tool: {tool.name}")
+    memory_agent = SimpleAgent(
+        llm_endpoint=cfg.llm_endpoint,
+        system_prompt=SYSTEM_PROMPT,
+        tools=[search_calls_tool, get_call_details_tool],
+        memory=memory,
+    )
 
-genie_tools = create_mcp_tools(w, [genie_url])
-
-full_agent = SimpleAgent(
-    llm_endpoint=cfg.llm_endpoint,
-    system_prompt=SYSTEM_PROMPT,
-    tools=[search_calls_tool, get_call_details_tool, *genie_tools],
-)
-
-question = "How many open calls close before June 2027, and which ones close first?"
-logger.info("=" * 80)
-logger.info(f"USER: {question}")
-logger.info(f"AGENT: {full_agent.chat(question)}")
+    session_id = str(uuid.uuid4())
+    for question in [
+        "Which open calls fit research on intelligent transport systems for road safety?",
+        "What is the deadline and the link of the first call you recommended?",
+    ]:
+        logger.info("=" * 80)
+        logger.info(f"USER: {question}")
+        logger.info(f"AGENT: {memory_agent.chat(question, session_id=session_id)}")
